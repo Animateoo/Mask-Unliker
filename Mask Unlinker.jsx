@@ -1,0 +1,493 @@
+/*
+* Mask Unlinker
+* Ultra-pure implementation: No complex space transformations,
+* just native toComp and fromComp inside the expression.
+*/
+
+(function(thisObj) {
+    var scriptName = "Mask Unlinker";
+
+    function getSelectedMaskPaths(comp) {
+        var paths = [];
+        var props = comp.selectedProperties;
+        if (!props) return paths;
+        for (var i = 0; i < props.length; i++) {
+            var p = props[i];
+            if (p.propertyType === PropertyType.PROPERTY && p.matchName === "ADBE Mask Shape") {
+                paths.push(p);
+            } else if (p.propertyType === PropertyType.NAMED_GROUP && p.matchName === "ADBE Mask Atom") {
+                var pathProp = p.property("ADBE Mask Shape");
+                if (pathProp) paths.push(pathProp);
+            }
+        }
+        return paths;
+    }
+
+    function unlinkMask(comp) {
+        var paths = getSelectedMaskPaths(comp);
+        if (paths.length === 0) {
+            alert("Please select a Mask or Mask Path before unlinking.");
+            return;
+        }
+
+        app.beginUndoGroup("Unlink Mask");
+        for (var i = 0; i < paths.length; i++) {
+            var path = paths[i];
+            if (path.expressionEnabled && path.expression.indexOf("//MaskUnlinker") !== -1) {
+                continue; 
+            }
+
+            var pos = [0,0], anc = [0,0], scl = [100,100], rot = 0;
+            var layer = path;
+            while(layer.parentProperty !== null) {
+                layer = layer.parentProperty;
+            }
+            if (layer !== null) {
+                var tg = layer.property("ADBE Transform Group");
+                if (tg) {
+                    if (tg.property("ADBE Position")) pos = tg.property("ADBE Position").value;
+                    if (tg.property("ADBE Anchor Point")) anc = tg.property("ADBE Anchor Point").value;
+                    if (tg.property("ADBE Scale")) scl = tg.property("ADBE Scale").value;
+                    if (tg.property("ADBE Rotation")) rot = tg.property("ADBE Rotation").value;
+                    else if (tg.property("ADBE Z Rotation")) rot = tg.property("ADBE Z Rotation").value;
+                }
+            }
+            
+            var expr = "//MaskUnlinker\n" +
+            "var iPos = [" + pos[0] + "," + pos[1] + "];\n" +
+            "var iAnc = [" + anc[0] + "," + anc[1] + "];\n" +
+            "var iScl = [" + scl[0] + "," + scl[1] + "];\n" +
+            "var iRot = " + rot + ";\n" +
+            "try {\n" +
+            "var tr = thisLayer.transform;\n" +
+            "var cPos = tr.position, cAnc = tr.anchorPoint, cScl = tr.scale;\n" +
+            "var cRot = tr.rotation || tr.zRotation || 0;\n" +
+            "var m = thisProperty;\n" +
+            "var pts = m.points(), inT = m.inTangents(), outT = m.outTangents();\n" +
+            "var nPts = [], nIn = [], nOut = [];\n" +
+            "var c0 = Math.cos(iRot*Math.PI/180), s0 = Math.sin(iRot*Math.PI/180);\n" +
+            "var c1 = Math.cos(cRot*Math.PI/180), s1 = Math.sin(cRot*Math.PI/180);\n" +
+            "var sX = cScl[0]/100, sY = cScl[1]/100;\n" +
+            "if(sX==0) sX=0.0001; if(sY==0) sY=0.0001;\n" +
+            "for (var i = 0; i < pts.length; i++) {\n" +
+            "   var dx0 = pts[i][0] - iAnc[0], dy0 = pts[i][1] - iAnc[1];\n" +
+            "   dx0 *= iScl[0]/100; dy0 *= iScl[1]/100;\n" +
+            "   var px = dx0*c0 - dy0*s0 + iPos[0];\n" +
+            "   var py = dx0*s0 + dy0*c0 + iPos[1];\n" +
+            "   var dx1 = px - cPos[0], dy1 = py - cPos[1];\n" +
+            "   var rx = dx1*c1 + dy1*s1, ry = -dx1*s1 + dy1*c1;\n" +
+            "   nPts.push([rx/sX + cAnc[0], ry/sY + cAnc[1]]);\n" +
+            "   var vx = inT[i][0]*(iScl[0]/100), vy = inT[i][1]*(iScl[1]/100);\n" +
+            "   var vxp = vx*c0 - vy*s0, vyp = vx*s0 + vy*c0;\n" +
+            "   nIn.push([(vxp*c1 + vyp*s1)/sX, (-vxp*s1 + vyp*c1)/sY]);\n" +
+            "   vx = outT[i][0]*(iScl[0]/100); vy = outT[i][1]*(iScl[1]/100);\n" +
+            "   vxp = vx*c0 - vy*s0; vyp = vx*s0 + vy*c0;\n" +
+            "   nOut.push([(vxp*c1 + vyp*s1)/sX, (-vxp*s1 + vyp*c1)/sY]);\n" +
+            "}\n" +
+            "createPath(nPts, nIn, nOut, m.isClosed());\n" +
+            "} catch(err) { value; }";
+
+            path.expression = expr;
+            path.expressionEnabled = true;
+        }
+        app.endUndoGroup();
+    }
+
+    function relinkMask(comp) {
+        var paths = getSelectedMaskPaths(comp);
+        if (paths.length === 0) {
+            alert("Please select a Mask or Mask Path before relinking.");
+            return;
+        }
+
+        app.beginUndoGroup("Relink Mask");
+        for (var i = 0; i < paths.length; i++) {
+            var path = paths[i];
+            if (path.expressionEnabled && path.expression.indexOf("//MaskUnlinker") !== -1) {
+                // IMPORTANT: Read the value BEFORE disabling the expression
+                // so we get the visually "fixed" path generated by the expression.
+                var curVal = path.value; 
+                path.expressionEnabled = false;
+                path.expression = "";
+                path.setValue(curVal);
+            }
+        }
+        app.endUndoGroup();
+    }
+
+    function convertMasksToShapes(comp) {
+        app.beginUndoGroup("Mask to Shape");
+        var items = [];
+        for (var i = 0; i < comp.selectedProperties.length; i++) items.push(comp.selectedProperties[i]);
+        if(items.length === 0) {
+            var layers = comp.selectedLayers;
+            for(var x=0; x<layers.length; x++) {
+                var mParade = layers[x].property("ADBE Mask Parade");
+                if(mParade) {
+                    for(var y=1; y<=mParade.numProperties; y++) {
+                        items.push(mParade.property(y).property("ADBE Mask Shape"));
+                    }
+                }
+            }
+        }
+        
+        var masks = [];
+        for(var i=0; i<items.length; i++) {
+            var p = items[i];
+            if(p.matchName === "ADBE Mask Shape") {
+                var L = p;
+                while(L.parentProperty !== null) L = L.parentProperty;
+                masks.push({prop: p, pLayer: L});
+            }
+        }
+
+        if(masks.length === 0) { alert("Please select a Mask to convert."); app.endUndoGroup(); return; }
+
+        for(var i=0; i<masks.length; i++) {
+            var mItem = masks[i];
+            var lay = mItem.pLayer;
+            var shapeLayer = comp.layers.addShape();
+            shapeLayer.name = lay.name + " - Shape";
+            shapeLayer.moveBefore(lay);
+            
+            var tProps = ["Position", "Anchor Point", "Scale", "Rotation", "Opacity"];
+            for(var t=0; t<tProps.length; t++) {
+                try { shapeLayer.transform.property("ADBE " + tProps[t]).setValue(lay.transform.property("ADBE " + tProps[t]).value); } catch(e){}
+            }
+            try { shapeLayer.transform.property("ADBE Z Rotation").setValue(lay.transform.property("ADBE Z Rotation").value); } catch(e){}
+            if(lay.threeDLayer) {
+                shapeLayer.threeDLayer = true;
+                try { shapeLayer.transform.property("ADBE X Rotation").setValue(lay.transform.property("ADBE X Rotation").value); } catch(e){}
+                try { shapeLayer.transform.property("ADBE Y Rotation").setValue(lay.transform.property("ADBE Y Rotation").value); } catch(e){}
+                try { shapeLayer.transform.property("ADBE Orientation").setValue(lay.transform.property("ADBE Orientation").value); } catch(e){}
+            }
+
+            var shapeGroup = shapeLayer.property("ADBE Root Vectors Group");
+            var pathGroup = shapeGroup.addProperty("ADBE Vector Shape - Group");
+            pathGroup.property("ADBE Vector Shape").setValue(mItem.prop.value);
+            var fillProp = shapeGroup.addProperty("ADBE Vector Graphic - Fill");
+            fillProp.property("ADBE Vector Fill Color").setValue([0.75, 0.75, 0.75]); // default grayish fill
+            
+            // Remove the original mask
+            try { mItem.prop.parentProperty.remove(); } catch(e) {}
+        }
+        app.endUndoGroup();
+    }
+
+    function convertShapesToMasks(comp) {
+        app.beginUndoGroup("Shape to Mask");
+        var selectedLayers = comp.selectedLayers;
+        var selectedProps = [];
+        for (var i = 0; i < comp.selectedProperties.length; i++) selectedProps.push(comp.selectedProperties[i]);
+        
+        var targetLayer = null;
+        if (selectedLayers.length > 1) {
+            for (var i = selectedLayers.length - 1; i >= 0; i--) {
+                if (selectedLayers[i].matchName !== "ADBE Vector Layer") {
+                    targetLayer = selectedLayers[i]; break;
+                }
+            }
+            if (!targetLayer) targetLayer = selectedLayers[selectedLayers.length - 1];
+        } else if (selectedLayers.length === 1) {
+            targetLayer = selectedLayers[0];
+        }
+
+        if (!targetLayer) { app.endUndoGroup(); return; }
+
+        var shapes = [];
+        var getShapesRecursive = function(group, layerObj, transformStack) {
+            var currentTransform = { pos: [0,0], anc: [0,0], scl: [100,100], rot: 0 };
+            try {
+                var tr = group.property("ADBE Vector Transform Group");
+                if (tr) {
+                    currentTransform.pos = tr.property("ADBE Vector Position").value;
+                    currentTransform.anc = tr.property("ADBE Vector Anchor").value;
+                    currentTransform.scl = tr.property("ADBE Vector Scale").value;
+                    currentTransform.rot = tr.property("ADBE Vector Rotation").value;
+                }
+            } catch(e) {}
+            var newStack = transformStack.slice();
+            newStack.push(currentTransform);
+
+            for (var k = 1; k <= group.numProperties; k++) {
+                var prop = group.property(k);
+                if (prop.matchName === "ADBE Vector Shape") {
+                    shapes.push({prop: prop, layer: layerObj, stack: newStack});
+                } else if (prop.propertyType === PropertyType.NAMED_GROUP || prop.propertyType === PropertyType.INDEXED_GROUP) {
+                    getShapesRecursive(prop, layerObj, newStack);
+                }
+            }
+        };
+
+        if (selectedProps.length === 0) {
+            for (var i = 0; i < selectedLayers.length; i++) {
+                var sl = selectedLayers[i];
+                if (sl === targetLayer && selectedLayers.length > 1) continue;
+                var rGroup = sl.property("ADBE Root Vectors Group");
+                if (rGroup) getShapesRecursive(rGroup, sl, []);
+            }
+        } else {
+            for (var i = 0; i < selectedProps.length; i++) {
+                var p = selectedProps[i];
+                if (p.matchName === "ADBE Vector Shape") {
+                    var lObj = p; while (lObj.parentProperty !== null) lObj = lObj.parentProperty;
+                    var stack = [];
+                    var pnt = p.parentProperty;
+                    while(pnt && pnt.matchName !== "ADBE Root Vectors Group") {
+                        try {
+                            var tr = pnt.property("ADBE Vector Transform Group");
+                            if(tr) stack.unshift({ pos: tr.property("ADBE Vector Position").value, anc: tr.property("ADBE Vector Anchor").value, scl: tr.property("ADBE Vector Scale").value, rot: tr.property("ADBE Vector Rotation").value });
+                        } catch(e) {}
+                        pnt = pnt.parentProperty;
+                    }
+                    shapes.push({prop: p, layer: lObj, stack: stack});
+                }
+            }
+        }
+
+        if (shapes.length === 0) { app.endUndoGroup(); return; }
+
+        var mscConvertRotate = function(x, y, angle) {
+            var radian = angle * (Math.PI / 180);
+            return [(x * Math.cos(radian)) - (y * Math.sin(radian)), (x * Math.sin(radian)) + (y * Math.cos(radian))];
+        };
+
+        for (var s = 0; s < shapes.length; s++) {
+            var sItem = shapes[s];
+            if (sItem.layer === targetLayer && selectedLayers.length === 1) {
+                var maskGroup = targetLayer.property("ADBE Mask Parade");
+                if (maskGroup) maskGroup.addProperty("ADBE Mask Atom").property("ADBE Mask Shape").setValue(sItem.prop.value);
+                continue;
+            }
+
+            var pLa = [0,0], aLa = [0,0], rLa = 0, sLa = [100,100];
+            try { pLa = targetLayer.transform.position.value; aLa = targetLayer.transform.anchorPoint.value; rLa = targetLayer.transform.rotation.value; sLa = targetLayer.transform.scale.value; } catch(e) {}
+            var pSe = [0,0], aSe = [0,0], rSe = 0, sSe = [100,100];
+            try { pSe = sItem.layer.transform.position.value; aSe = sItem.layer.transform.anchorPoint.value; rSe = sItem.layer.transform.rotation.value; sSe = sItem.layer.transform.scale.value; } catch(e) {}
+
+            var pShp = [0,0], aShp = [0,0], sShp = [100,100], rShp = 0;
+            var hasInner = (sItem.stack && sItem.stack.length > 0);
+            if (hasInner) { pShp = sItem.stack[0].pos; aShp = sItem.stack[0].anc; sShp = sItem.stack[0].scl; rShp = sItem.stack[0].rot; }
+
+            var shapePath = sItem.prop.value;
+            var v = shapePath.vertices, inT = shapePath.inTangents, outT = shapePath.outTangents;
+            var vFixed = [], inFixed = [], outFixed = [];
+
+            for (var k = 0; k < v.length; k++) {
+                var xv = v[k][0], yv = v[k][1];
+                
+                if (!hasInner) {
+                    xv = (xv + aLa[0]) - aSe[0]; yv = (yv + aLa[1]) - aSe[1];
+                } else {
+                    xv = (xv - (pLa[0] - aLa[0])) + (pSe[0] - aSe[0]) + (pShp[0] - aShp[0]);
+                    yv = (yv - (pLa[1] - aLa[1])) + (pSe[1] - aSe[1]) + (pShp[1] - aShp[1]);
+                    xv = (((((xv * sShp[0]) / 100) - (pSe[0] - pLa[0])) - ((pSe[0] - pLa[0]) * ((sShp[0] / 100) - 1))) - ((aSe[0] - aLa[0]) * (1 - (sShp[0] / 100)))) - (pShp[0] * ((sShp[0] / 100) - 1));
+                    yv = (((((yv * sShp[1]) / 100) - (pSe[1] - pLa[1])) - ((pSe[1] - pLa[1]) * ((sShp[1] / 100) - 1))) - ((aSe[1] - aLa[1]) * (1 - (sShp[1] / 100)))) - (pShp[1] * ((sShp[1] / 100) - 1));
+                }
+
+                xv = ((xv * sSe[0]) / 100) - (aLa[0] * ((sSe[0] / 100) - 1));
+                yv = ((yv * sSe[1]) / 100) - (aLa[1] * ((sSe[1] / 100) - 1));
+                xv = (xv / (sLa[0] / 100)) + ((pSe[0] - pLa[0]) / (sLa[0] / 100)) + ((aLa[0] * ((sLa[0] / 100) - 1)) / (sLa[0] / 100));
+                yv = (yv / (sLa[1] / 100)) + ((pSe[1] - pLa[1]) / (sLa[1] / 100)) + ((aLa[1] * ((sLa[1] / 100) - 1)) / (sLa[1] / 100));
+
+                if (hasInner) {
+                    var c1 = mscConvertRotate((((xv - aLa[0]) - (pSe[0] - pLa[0])) - pShp[0]) + aSe[0], (((yv - aLa[1]) - (pSe[1] - pLa[1])) - pShp[1]) + aSe[1], rShp);
+                    xv = (c1[0] + aLa[0] + (pSe[0] - pLa[0]) + pShp[0]) - aSe[0];
+                    yv = (c1[1] + aLa[1] + (pSe[1] - pLa[1]) + pShp[1]) - aSe[1];
+                }
+
+                var c2 = mscConvertRotate((xv - aLa[0]) - (pSe[0] - pLa[0]), (yv - aLa[1]) - (pSe[1] - pLa[1]), rSe);
+                xv = c2[0] + aLa[0] + (pSe[0] - pLa[0]);
+                yv = c2[1] + aLa[1] + (pSe[1] - pLa[1]);
+                var c3 = mscConvertRotate(xv - aLa[0], yv - aLa[1], -rLa);
+                vFixed.push([c3[0] + aLa[0], c3[1] + aLa[1]]);
+
+                var i1 = mscConvertRotate(inT[k][0], inT[k][1], rSe);
+                var xI2 = i1[0], yI2 = i1[1];
+                if (hasInner) { var i2 = mscConvertRotate(xI2, yI2, rShp); xI2 = i2[0]; yI2 = i2[1]; }
+                var i3 = mscConvertRotate(xI2, yI2, -rLa);
+                inFixed.push([i3[0], i3[1]]);
+
+                var o1 = mscConvertRotate(outT[k][0], outT[k][1], rSe);
+                var xO2 = o1[0], yO2 = o1[1];
+                if (hasInner) { var o2 = mscConvertRotate(xO2, yO2, rShp); xO2 = o2[0]; yO2 = o2[1]; }
+                var o3 = mscConvertRotate(xO2, yO2, -rLa);
+                outFixed.push([o3[0], o3[1]]);
+            }
+
+            var path = new Shape();
+            path.vertices = vFixed; path.inTangents = inFixed; path.outTangents = outFixed; path.closed = shapePath.closed;
+            var maskGroup = targetLayer.property("ADBE Mask Parade");
+            if (maskGroup) maskGroup.addProperty("ADBE Mask Atom").property("ADBE Mask Shape").setValue(path);
+        }
+
+        for (var i = 0; i < selectedLayers.length; i++) {
+            if (selectedLayers[i] !== targetLayer && selectedLayers[i].matchName === "ADBE Vector Layer") {
+                try { selectedLayers[i].remove(); } catch(e) { try { selectedLayers[i].enabled = false; } catch(e2) {} }
+            }
+        }
+        app.endUndoGroup();
+    }
+
+    function separateMasks(comp) {
+        app.beginUndoGroup("Separate Masks");
+        var selectedLayers = [];
+        for (var i = 0; i < comp.selectedLayers.length; i++) selectedLayers.push(comp.selectedLayers[i]);
+
+        if (selectedLayers.length === 0) {
+            alert("Please select a layer with masks to separate.");
+            app.endUndoGroup(); return;
+        }
+
+        for (var l = 0; l < selectedLayers.length; l++) {
+            var lay = selectedLayers[l];
+            var maskParade = lay.property("ADBE Mask Parade");
+            if (!maskParade || maskParade.numProperties < 2) continue;
+            
+            var totalMasks = maskParade.numProperties;
+            for (var m = 1; m <= totalMasks; m++) {
+                var dLay = lay.duplicate();
+                dLay.name = lay.name + " - " + maskParade.property(m).name;
+                
+                var dParade = dLay.property("ADBE Mask Parade");
+                for (var del = dParade.numProperties; del >= 1; del--) {
+                    if (del !== m) {
+                        dParade.property(del).remove();
+                    }
+                }
+            }
+            try { lay.remove(); } catch(e) { lay.enabled = false; }
+        }
+        app.endUndoGroup();
+    }
+
+    // -----------------------------------
+    // UI Builder
+    // -----------------------------------
+    function buildUI(thisObj) {
+        var win = (thisObj instanceof Panel) ? thisObj : new Window("palette", scriptName, undefined, {resizeable:true});
+        if (win !== null) {
+            win.spacing = 8;
+            win.margins = 10;
+            win.orientation = "column";
+            win.alignChildren = ["fill", "top"];
+
+            if (win.graphics) {
+                win.graphics.backgroundColor = win.graphics.newBrush(win.graphics.BrushType.SOLID_COLOR, [0.12, 0.12, 0.12, 1]);
+            }
+
+            var btnPanel = win.add("group");
+            btnPanel.orientation = "row";
+            btnPanel.alignChildren = ["left", "top"];
+            btnPanel.spacing = 6;
+            btnPanel.margins = 0;
+
+            var forceRedraw = function(el) {
+                if (el && el.visible) {
+                    el.visible = false; el.visible = true;
+                }
+            };
+
+            var renderIcon = function(g, w, h, type, isHover) {
+                var bgNum = isHover ? 0.14 : 0.08; 
+                var brush = g.newBrush(g.BrushType.SOLID_COLOR, [bgNum, bgNum, bgNum, 1]);
+                g.newPath(); g.rectPath(0, 0, w, h); g.fillPath(brush);
+                
+                var pen = g.newPen(g.PenType.SOLID_COLOR, [0.05, 0.05, 0.05, 1], 1);
+                g.strokePath(pen);
+                
+                var cx = w / 2;
+                var cy = h / 2;
+                
+                var fillCol = isHover ? [1.0, 1.0, 1.0, 1] : [0.75, 0.75, 0.75, 1];
+                var fillBrush = g.newBrush(g.BrushType.SOLID_COLOR, fillCol);
+                var linePen = g.newPen(g.PenType.SOLID_COLOR, fillCol, 1.5);
+                var dotBrush = g.newBrush(g.BrushType.SOLID_COLOR, fillCol);
+                
+                if(type === "unlink") {
+                    g.newPath(); g.rectPath(cx - 9, cy - 2, 9, 9); g.fillPath(fillBrush);
+                    g.newPath(); g.rectPath(cx + 1, cy - 9, 9, 9); g.strokePath(linePen);
+                    var nodes = [[cx+1, cy-9], [cx+10, cy-9], [cx+1, cy], [cx+10, cy]];
+                    for(var n=0; n<4; n++) { g.newPath(); g.rectPath(nodes[n][0]-1.5, nodes[n][1]-1.5, 3, 3); g.fillPath(dotBrush); }
+                } else if(type === "relink") {
+                    g.newPath(); g.rectPath(cx - 5, cy - 5, 10, 10); g.fillPath(fillBrush);
+                    g.newPath(); g.rectPath(cx - 8, cy - 8, 16, 16); g.strokePath(linePen);
+                    var nodes = [[cx-8, cy-8], [cx+8, cy-8], [cx-8, cy+8], [cx+8, cy+8]];
+                    for(var n=0; n<4; n++) { g.newPath(); g.rectPath(nodes[n][0]-1.5, nodes[n][1]-1.5, 3, 3); g.fillPath(dotBrush); }
+                } else if(type === "mask2shape") {
+                    g.newPath(); g.rectPath(cx - 13, cy - 5, 8, 8); g.strokePath(linePen);
+                    var nodes2 = [[cx-13, cy-5], [cx-5, cy-5], [cx-13, cy+3], [cx-5, cy+3]];
+                    for(var n=0; n<4; n++) { g.newPath(); g.rectPath(nodes2[n][0]-1.5, nodes2[n][1]-1.5, 3, 3); g.fillPath(dotBrush); }
+                    g.newPath(); g.moveTo(cx-1, cy); g.lineTo(cx+3, cy); g.strokePath(linePen);
+                    g.newPath(); g.moveTo(cx+2, cy-2); g.lineTo(cx+4, cy); g.lineTo(cx+2, cy+2); g.strokePath(linePen);
+                    g.newPath(); g.rectPath(cx + 5, cy - 5, 8, 8); g.fillPath(fillBrush);
+                } else if(type === "shape2mask") {
+                    g.newPath(); g.rectPath(cx - 13, cy - 5, 8, 8); g.fillPath(fillBrush);
+                    g.newPath(); g.moveTo(cx-1, cy); g.lineTo(cx+3, cy); g.strokePath(linePen);
+                    g.newPath(); g.moveTo(cx+2, cy-2); g.lineTo(cx+4, cy); g.lineTo(cx+2, cy+2); g.strokePath(linePen);
+                    g.newPath(); g.rectPath(cx + 5, cy - 5, 8, 8); g.strokePath(linePen);
+                    var nodes3 = [[cx+5, cy-5], [cx+13, cy-5], [cx+5, cy+3], [cx+13, cy+3]];
+                    for(var n=0; n<4; n++) { g.newPath(); g.rectPath(nodes3[n][0]-1.5, nodes3[n][1]-1.5, 3, 3); g.fillPath(dotBrush); }
+                } else if(type === "separate") {
+                    g.newPath(); g.rectPath(cx - 12, cy - 5, 8, 10); g.strokePath(linePen);
+                    g.newPath(); g.rectPath(cx + 4, cy - 5, 8, 10); g.strokePath(linePen);
+                    var nodes4 = [[cx-12, cy-5], [cx-4, cy-5], [cx-12, cy+5], [cx-4, cy+5],
+                                  [cx+4, cy-5], [cx+12, cy-5], [cx+4, cy+5], [cx+12, cy+5]];
+                    for(var n=0; n<nodes4.length; n++) { g.newPath(); g.rectPath(nodes4[n][0]-1.5, nodes4[n][1]-1.5, 3, 3); g.fillPath(dotBrush); }
+                    g.newPath(); g.moveTo(cx - 2, cy-1); g.lineTo(cx - 5, cy-1); g.lineTo(cx - 3, cy - 3); g.strokePath(linePen);
+                    g.newPath(); g.moveTo(cx - 5, cy-1); g.lineTo(cx - 3, cy + 1); g.strokePath(linePen);
+                    g.newPath(); g.moveTo(cx + 2, cy+1); g.lineTo(cx + 5, cy+1); g.lineTo(cx + 3, cy - 1); g.strokePath(linePen);
+                    g.newPath(); g.moveTo(cx + 5, cy+1); g.lineTo(cx + 3, cy + 3); g.strokePath(linePen);
+                }
+            };
+
+            var pnlUnlink = btnPanel.add("group");
+            pnlUnlink.preferredSize = [42, 42];  pnlUnlink.helpTip = "Unlink Mask"; pnlUnlink.isHover = false;
+            pnlUnlink.onDraw = function() { renderIcon(this.graphics, this.size[0], this.size[1], "unlink", this.isHover); };
+            pnlUnlink.addEventListener("mouseover", function() { this.isHover=true; forceRedraw(this); });
+            pnlUnlink.addEventListener("mouseout", function() { this.isHover=false; forceRedraw(this); });
+            pnlUnlink.addEventListener("mousedown", function() { try { app.activeViewer && app.activeViewer.setActive(); var c = app.project.activeItem; if(c && c instanceof CompItem) unlinkMask(c); } catch(e) {} });
+
+            var pnlRelink = btnPanel.add("group");
+            pnlRelink.preferredSize = [42, 42]; pnlRelink.helpTip = "Relink Mask"; pnlRelink.isHover = false;
+            pnlRelink.onDraw = function() { renderIcon(this.graphics, this.size[0], this.size[1], "relink", this.isHover); };
+            pnlRelink.addEventListener("mouseover", function() { this.isHover=true; forceRedraw(this); });
+            pnlRelink.addEventListener("mouseout", function() { this.isHover=false; forceRedraw(this); });
+            pnlRelink.addEventListener("mousedown", function() { try { app.activeViewer && app.activeViewer.setActive(); var c = app.project.activeItem; if(c && c instanceof CompItem) relinkMask(c); } catch(e) {} });
+
+            var pnlM2S = btnPanel.add("group");
+            pnlM2S.preferredSize = [42, 42]; pnlM2S.helpTip = "Mask to Shape"; pnlM2S.isHover = false;
+            pnlM2S.onDraw = function() { renderIcon(this.graphics, this.size[0], this.size[1], "mask2shape", this.isHover); };
+            pnlM2S.addEventListener("mouseover", function() { this.isHover=true; forceRedraw(this); });
+            pnlM2S.addEventListener("mouseout", function() { this.isHover=false; forceRedraw(this); });
+            pnlM2S.addEventListener("mousedown", function() { try { app.activeViewer && app.activeViewer.setActive(); var c = app.project.activeItem; if(c && c instanceof CompItem) convertMasksToShapes(c); } catch(e) {} });
+
+            var pnlS2M = btnPanel.add("group");
+            pnlS2M.preferredSize = [42, 42]; pnlS2M.helpTip = "Shape to Mask"; pnlS2M.isHover = false;
+            pnlS2M.onDraw = function() { renderIcon(this.graphics, this.size[0], this.size[1], "shape2mask", this.isHover); };
+            pnlS2M.addEventListener("mouseover", function() { this.isHover=true; forceRedraw(this); });
+            pnlS2M.addEventListener("mouseout", function() { this.isHover=false; forceRedraw(this); });
+            pnlS2M.addEventListener("mousedown", function() { try { app.activeViewer && app.activeViewer.setActive(); var c = app.project.activeItem; if(c && c instanceof CompItem) convertShapesToMasks(c); } catch(e) {} });
+
+            var pnlSep = btnPanel.add("group");
+            pnlSep.preferredSize = [42, 42]; pnlSep.helpTip = "Separate Masks"; pnlSep.isHover = false;
+            pnlSep.onDraw = function() { renderIcon(this.graphics, this.size[0], this.size[1], "separate", this.isHover); };
+            pnlSep.addEventListener("mouseover", function() { this.isHover=true; forceRedraw(this); });
+            pnlSep.addEventListener("mouseout", function() { this.isHover=false; forceRedraw(this); });
+            pnlSep.addEventListener("mousedown", function() { try { app.activeViewer && app.activeViewer.setActive(); var c = app.project.activeItem; if(c && c instanceof CompItem) separateMasks(c); } catch(e) {} });
+
+            win.onResizing = win.onResize = function() {
+                this.layout.resize();
+            };
+            
+            win.layout.layout(true);
+            return win;
+        }
+    }
+
+    var winPanel = buildUI(thisObj);
+    if (winPanel !== null && winPanel instanceof Window) {
+        winPanel.center();
+        winPanel.show();
+    }
+})(this);
